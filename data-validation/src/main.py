@@ -1,3 +1,20 @@
+'''
+Data Validation After Migration from MySQL to Snowflake
+
+Apart from basic validation techniques like comparison of number of rows and
+columns (reconciliation test), hashing has been
+used to perform validation.
+
+We get the hash value of each tuple in the MySQL table and compare it with the
+hash value of each tuple in the Snowflake table. This process can be followed
+when no operations are performed on the data before migration
+(example - deleting/adding rows or columns, transforming data to
+an alternative form, etc.).
+
+Multithreading has been used as a basic approach to speed up the
+process - two threads have been used to simultaneously get the hash
+values of both the MySQL table and the Snowflake table.
+'''
 import mysql.connector
 import snowflake.connector
 import pandas as pd
@@ -6,138 +23,135 @@ import numpy as np
 import time
 import threading
 from snowflake.connector.pandas_tools import write_pandas
+import sys
+
 import logging.config
 import logging
-from connection_to_db import connect_to_mysql
-from connection_to_db import connect_to_snowflake
+from conn2db import MyDBConnection
+from create_sf_table import create_snowflake_table
+from get_config import get_ini_config
+from get_config import get_common_config_value
+import defines
 
 
-logging.config.fileConfig(fname = logger_file_path,
+logging.config.fileConfig(fname = defines.LOGGER_FILE_PATH,
                                     disable_existing_loggers = False)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-
-
-# Creating Snowflake table
-def create_snowflake_table(sfq):
-    logger.info('Creating Snowflake table...')
-    sfq.execute("CREATE warehouse IF NOT EXISTS WH;")
-    sfq.execute('USE warehouse WH;')
-    sfq.execute("CREATE DATABASE IF NOT EXISTS Sales_db;")
-    sfq.execute('USE DATABASE Sales_db;')
-    sfq.execute('''CREATE OR REPLACE TABLE sales_table (Transaction_Id  Integer,
-                                            Product_Id  Integer,
-                                            Trans_Date  date,
-                                            Region string,
-                                            Zip_code string,
-                                            Items_Sold Integer,
-                                            Items_Returned Integer,
-                                            Reason string,
-                                            Unit_Price float,
-                                            Revenue float);''')
-    logger.info('***  Snowflake table created  ***')
-
+# Needed in all the functions
+tab_name = get_common_config_value(defines.TABLE_NAME)
+sql_cmd_g = ("Select * from %s" % tab_name)
 
 
 # Migrating data from MySQL to Snowflake
-def migrate(sf_con, df):
-    logger.info('Initiating migration...')
-    sfq.execute('USE warehouse WH;')
-    sfq.execute('USE DATABASE Sales_db;')
-    success, nchunks, nrows, _ = write_pandas(sf_con, df, table_name = 'sales_table', schema = 'public', quote_identifiers=False)
+def migrate(mysql_con, sf_con):
+    '''
+    Migrating data from MySQL to Snowflake
+    '''
+
+    sf_con.my_write_pandas(mysql_df_g, table_name = tab_name,
+        schema = 'public', quote_identifiers=False )
     logger.info('***  Migration completed!  ***')
 
 
+def get_hash_table(conn, df_type):
+    '''
+    Getting hash values of all rows of SQL table (Hash values
+    to be used for comparing)
+    '''
 
-# Getting hash values of all rows of SQL table (Hash values to be used for comparing)
-def SQL_getHash(conn, data1):
-    query = 'Select * from sales_table;'
-    SQL_getHash.data1 = pd.read_sql(query, conn)
-    SQL_getHash.hash2 = pd.Series((hash(tuple(row)) for _, row in SQL_getHash.data1.iterrows()))
+    if df_type == defines.MYSQL_STR:
+        get_hash_table.df_sql_hash = mysql_df_g
+        get_hash_table.hashx = pd.Series((hash(tuple(row)) for _,
+                row in get_hash_table.df_sql_hash.iterrows()))
+        get_hash_table.df_sql_hash['%s' % df_type] = get_hash_table.hashx
+        # logger.info(get_hash_table.df_sql_hash)
 
-    SQL_getHash.data1['sql hash'] = SQL_getHash.hash2
-    logger.info('************************************************************************************')
-    logger.debug(SQL_getHash.data1)
-
-
-
-# Getting hash values of all rows of Snowflake table
-def SF_getHash(sf_con_hash, sfq_hash):
-
-    USE_WH = 'Use warehouse WH;'
-
-    sfq_hash.execute(USE_WH)
-    sfq_hash.execute('Use database Sales_db;')
-    query = 'Select * from sales_table;  '
-    SF_getHash.Table = pd.read_sql(query, sf_con_hash)
-    logger.debug(SF_getHash.Table)
-
-    SF_getHash.hash1 = pd.Series((hash(tuple(row)) for _, row in SF_getHash.Table.iterrows()))
-
-    SF_getHash.Table['SF hash'] = SF_getHash.hash1
-    logger.debug(SF_getHash.Table)
+    elif df_type == defines.SNOWFLAKE_STR:
+        get_hash_table.df_sf_hash = sf_df_g
+        get_hash_table.hashx = pd.Series((hash(tuple(row)) for _,
+                row in get_hash_table.df_sf_hash.iterrows()))
+        get_hash_table.df_sf_hash['%s' % df_type] = get_hash_table.hashx
+        # logger.info(get_hash_table.df_sf_hash)
 
 
+def basic_validation(mysql_con, sf_con):
+    '''
+    Does basic validations by checking number of rows, etc.
+    '''
 
+    ''' Validate consistency in columns '''
 
-def basic_validation(df, sf_con, sfq):
-    sfq.execute('Use warehouse WH;')
-    sfq.execute('Use database Sales_db;')
-    query = 'Select * from sales_table;  '
-    sf_df = pd.read_sql(query, sf_con)
+    query_l = ("desc table %s; " % tab_name)
+    sf_count = len(sf_con.query(query_l))
+    query_l = ("desc %s; " % tab_name)
+    mysql_count = len(mysql_con.query(query_l))
+    logger.info("COLUMNS> mysql_count: %s  and sf_count: %s" % (mysql_count, sf_count))
 
-    if len(df.columns) == len(sf_df.columns):
-        logger.info('Number of colums in MySQL table = Number of colums Snowflake table')
+    if sf_count == mysql_count:
+        logger.info('Columns validation -- PASS')
     else:
-        logger.info('Number of rows in the two tables are not consistent.')
-        logger.info('Exiting validation')
-    if len(df) == len(sf_df):
-        logger.info('Number of rows in MySQL table = Number of rows Snowflake table')
-        logger.info('Reconciliation test - success')
+        logger.error('Colums validataion - FAIL')
+        logger.error('Colums are not consistent. Colums in MySQL is %s and in Snowflake is %s'
+                % (mysql_count, sf_count))
+        logger.critical('Exiting validation')
+        sys.exit(1)
+
+    ''' Validate number of rows'''
+    query_l = ('Select count(*) from %s ; ' % tab_name)
+    res_set = mysql_con.query(query_l)
+    mysql_count = res_set[0][0]
+    res_set = sf_con.query(query_l)
+    sf_count = res_set[0][0]
+    logger.info("ROWS> mysql_count: %s  and sf_count: %s" % (mysql_count, sf_count))
+    if mysql_count == sf_count:
+        logger.info('Rows validation - PASS')
     else:
-        logger.info('Number of coulmns in the two tables are not consistent.')
-        logger.info('Exiting validation')
+        logger.error('Rows validataion - FAIL')
+        logger.error('Rows are not consistent. Rows in MySQL is %s and in Snowflake is %s'
+                % (mysql_count, sf_count))
+        logger.critical('Exiting validation')
+        sys.exit(2)
+    logger.info('Reconcilation test - PASS')
 
-    temp_sf = []
-    temp_sql = []
-    for i in list(df.columns):
-        temp_sql.append(i.upper())
-    for j in list(sf_df.columns):
-        temp_sf.append(j.upper())
-    if temp_sql == temp_sf:
-        logger.info("Schema validation successful")
-    else:
-        logger.info('Schema inconsistent')
-        logger.info('Exiting validation')
+mysql_conn = MyDBConnection('mysql')
+sf_conn = MyDBConnection('snowflake')
+create_snowflake_table(sf_conn)
 
+mysql_conx = mysql_conn.connection
+mysql_df_g = pd.read_sql(sql_cmd_g, mysql_conx)
 
+sf_conx = sf_conn.connection
+sf_df_g = pd.read_sql(sql_cmd_g, sf_conx)
 
+migrate(mysql_conn.connection, sf_conn)
+basic_validation(mysql_conn, sf_conn)
 
-conn, cur, df = connect_to_mysql()
-sf_con, sfq = connect_to_snowflake()
-create_snowflake_table(sfq)
-migrate(sf_con, df)
-basic_validation(df, sf_con, sfq)
+time_without_thread = time.time()
+get_hash_table(mysql_conn, defines.MYSQL_STR)
+get_hash_table(sf_conn, defines.SNOWFLAKE_STR)
+time_without_thread = time.time() - time_without_thread
+logger.info('Time for hashing entire table without multithreads: %s ms' % str(time_without_thread)[:10])
 
-SF_getHash(sf_con, sfq)
-SQL_getHash(conn, df)
-
-t1= time.time()
-
-th1 = threading.Thread(target=SF_getHash(sf_con, sfq),args=())
-th2 = threading.Thread(target=SQL_getHash(conn, df),args=())
+time_with_thread = time.time()
+th1 = threading.Thread(target = get_hash_table(mysql_conn, defines.MYSQL_STR), args=())
+th2 = threading.Thread(target = get_hash_table(sf_conn, defines.SNOWFLAKE_STR), args=())
 
 th1.start()
 th2.start()
 th1.join()
 th2.join()
 Hash_table = pd.DataFrame()
-Hash_table["sql Hash Value"] = SQL_getHash.data1["sql hash"]
-Hash_table["SF Hash Value"] = SF_getHash.Table["SF hash"]
+time_with_thread = time.time() - time_with_thread
+logger.info('Time for hashing entire table with multithreads: %s ms' % str(time_with_thread)[:10])
+
+Hash_table["sql Hash Value"] = get_hash_table.df_sql_hash[defines.MYSQL_STR]
+Hash_table["SF Hash Value"] = get_hash_table.df_sf_hash[defines.SNOWFLAKE_STR]
 
 # Comparing hash values of MySQL rows and hash values of Snowflake rows
 Hash_table["comparison_column"] = np.where(Hash_table["sql Hash Value"] == Hash_table["SF Hash Value"], "Same", "Not Same")
-logger.debug(Hash_table)
-
-logger.info('Total time taken:',time.time()-t1)
+# logger.info(Hash_table)
+percentage = (time_without_thread - time_with_thread) / time_without_thread * 100
+logger.info('Percentage of time improvement with multithreading: %2.2f%s' \
+            % (percentage, '%'))

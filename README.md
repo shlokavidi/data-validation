@@ -51,18 +51,18 @@ mysql -u <user_id> -p
 select count(*) from <table_name>
 ```
 6.	The functionality of the main program
-*	Establishes connection with MySQL
-*	Establishes connection with Snowflake
-*	Creates the required table in Snowflake with expected columns and column types
-*	Migrates the data
-*	Performs basic data validation
-*	Performs hashing data validation (using single thread)
-*	Calculates the time taken for hashing data validation
-*	Creates two threads
+* Establishes connection with MySQL
+* Establishes connection with Snowflake
+* Creates the required table in Snowflake with expected columns and column types
+* Migrates the data
+* Performs basic data validation
+* Performs hashing data validation (using single thread)
+* Calculates the time taken for hashing data validation
+* Creates two threads
    - One thread to get the hash values in MySQL
    - Another thread to get the hash values in Snowflake
-*  Compares the time improvements with multithreads
+* Compares the time improvements with multithreads
    - Finally, run main.py to migrate data from MySQL to Snowflake, and validate it.
-   - Screenshots of the execution for reference
+
 
 

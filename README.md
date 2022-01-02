@@ -27,7 +27,7 @@ When the migrated table is large in size, that is, with multi-million records, m
 ### Installation
 1.	Clone the repo.
 ```sh
-   git clone https://github.com/shlokavidi/data-validation
+   gh repo clone shlokavidi/data-validation
 ```
 2.	Enter following details in in the `config/dv_config.ini` file.
 *	MySQL credentials
